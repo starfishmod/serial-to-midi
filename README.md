@@ -18,6 +18,11 @@ Only receives from serial, cannot send to it.
 
 	serial-to-midi --help
 
+## Compile
+The program is based on asoundlib.
+
+	gcc -std=c99 -o serial_to_midi serial_to_midi.c -lasound
+
 ## Contribute
 
 Just fork, open issues and open pull requests to help improving this utility. Every contribution is welcome.
