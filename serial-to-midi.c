@@ -433,7 +433,7 @@ int main(int argc, char **argv) {
     exit(1);
   }
 
-  unsigned char buffer[1];
+  unsigned char buffer[4];
   int available;
 
   int serial_fd = open_serial_port(arguments.args[0], baudrate);
@@ -443,10 +443,10 @@ int main(int argc, char **argv) {
   seq_handle = open_seq(arguments.alsa_seq_name);
   while(1) {
     available = read(serial_fd, &buffer, sizeof(buffer));
-    if (available > 0) {
-      compute_byte(buffer[0]);
+    for (int i=0;i<available;i++) {
+      compute_byte(buffer[i]);
     }
-    else {
+    if (available == 0) {
       if (access(arguments.args[0], R_OK) == -1) {
 	// device removed
 	printf("[serial-to-midi] Error: Device removed -> exit\n");
