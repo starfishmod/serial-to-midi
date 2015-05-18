@@ -136,17 +136,22 @@ int open_serial_port(char port[], int baudrate) {
   int fd;
   struct termios options;
 
-  fd = open(port, O_RDWR | O_NOCTTY | O_NDELAY);
+  fd = open(port, O_RDWR | O_NOCTTY | O_NDELAY, O_NONBLOCK);
   if (fd == -1) {
     printf("[serial-to-midi] open_serial_port: Unable to open serial port %s\n", port);
   }
   else {
-    fcntl(fd, F_SETFL, 0);
+    fcntl(fd, F_SETFL, O_RDWR);
     tcgetattr(fd, &options);
     cfsetispeed(&options, baudrate);
     cfsetospeed(&options, baudrate);
+    options.c_iflag &= ~(IGNBRK | BRKINT | PARMRK | ISTRIP
+			 | INLCR | IGNCR | ICRNL | IXON);
+    options.c_oflag &= ~OPOST;
+    options.c_lflag &= ~(ECHO | ECHONL | ICANON | ISIG | IEXTEN);
+    options.c_cflag &= ~(CSIZE | PARENB);
+    options.c_cflag |= CS8;
     options.c_cflag |= (CLOCAL | CREAD);
-    options.c_lflag &= ~(ICANON | ECHO | ECHOE | ISIG);
     tcsetattr(fd, TCSANOW, &options);
   }
 
