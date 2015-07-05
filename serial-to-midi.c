@@ -17,7 +17,7 @@
  51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 */
 
-
+#define _POSIX_C_SOURCE	199309L /* Needed to get sleep working */
 #include <stdio.h>   /* Standard input/output definitions */
 #include <unistd.h>  /* UNIX standard function definitions */
 #include <fcntl.h>   /* File control definitions */
@@ -27,6 +27,7 @@
 #include <signal.h>
 #include <alsa/asoundlib.h>
 #include <argp.h> /* Argument parsing */
+#include <time.h> /* Sleep */
 
 // argp arguments
 const char *argp_program_version = "SerialToMidi 0.1";
@@ -441,6 +442,10 @@ int main(int argc, char **argv) {
   unsigned char buffer[4];
   int available;
 
+  struct timespec ts;
+  ts.tv_sec=0;
+  ts.tv_nsec = 500;
+
   int serial_fd = open_serial_port(arguments.args[0], baudrate);
   if (serial_fd < 0) {
     exit(1);
@@ -462,5 +467,6 @@ int main(int argc, char **argv) {
 	exit(1);
       }
     }
+    nanosleep(&ts, NULL);
   }
 }
