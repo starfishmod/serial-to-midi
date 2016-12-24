@@ -21,7 +21,7 @@ Only receives from serial, cannot send to it.
 ## Compile
 The program is based on asoundlib.
 
-	gcc -std=c99 -o serial_to_midi serial_to_midi.c -lasound
+	gcc -std=c99 -o serial-to-midi serial-to-midi.c -lasound
 
 ## Contribute
 

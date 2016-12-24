@@ -1,6 +1,6 @@
 /*
  Serial To Midi
- Copyright (C) 2015 Valentin Pratz
+ Copyright (C) 2016 Valentin Pratz
 
  This program is free software; you can redistribute it and/or modify
  it under the terms of the GNU General Public License as published by
@@ -26,11 +26,12 @@
 #include <stdlib.h>
 #include <signal.h>
 #include <alsa/asoundlib.h>
+#include <alloca.h>
 #include <argp.h> /* Argument parsing */
 #include <time.h> /* Sleep */
 
 // argp arguments
-const char *argp_program_version = "SerialToMidi 0.1";
+const char *argp_program_version = "SerialToMidi 0.2";
 const char *argp_program_bug_address = "<vp@vocaword.org>";
 // structure to communicate with argopt
 struct arguments {
@@ -120,7 +121,9 @@ static const unsigned char RESET = 0b1111;
 
 int baudrate;
 int port_out_id;
+int port_in_id;
 snd_seq_t *seq_handle;
+snd_midi_event_t *parser;
 snd_seq_event_t ev;
 
 unsigned char status_byte = 0;
@@ -142,7 +145,7 @@ int open_serial_port(char port[], int baudrate) {
     printf("[serial-to-midi] open_serial_port: Unable to open serial port %s\n", port);
   }
   else {
-    fcntl(fd, F_SETFL, O_RDWR);
+    fcntl(fd, F_SETFL, O_RDWR | O_NONBLOCK);
     tcgetattr(fd, &options);
     cfsetispeed(&options, baudrate);
     cfsetospeed(&options, baudrate);
@@ -167,16 +170,22 @@ snd_seq_t *open_seq(char alsa_seq_name[]) {
     exit(1);
   }
   snd_seq_set_client_name(seq_handle, alsa_seq_name);
-  if ((port_out_id = snd_seq_create_simple_port(seq_handle, alsa_seq_name,
+  if ((port_out_id = snd_seq_create_simple_port(seq_handle, "midi out",
 						SND_SEQ_PORT_CAP_READ|SND_SEQ_PORT_CAP_SUBS_READ,
 						SND_SEQ_PORT_TYPE_APPLICATION)) < 0) {
-    fprintf(stderr, "[serial-to-midi] Error creating sequencer port: %s.\n", alsa_seq_name);
+    fprintf(stderr, "[serial-to-midi] Error creating sequencer output port: %s.\n", alsa_seq_name);
+    exit(1);
+  }
+  if ((port_in_id = snd_seq_create_simple_port(seq_handle, "midi in",
+                                         SND_SEQ_PORT_CAP_WRITE|SND_SEQ_PORT_CAP_SUBS_WRITE,
+                                         SND_SEQ_PORT_TYPE_APPLICATION)) < 0) {
+    fprintf(stderr, "[serial-to-midi] Error creating sequencer input port: %s.\n", alsa_seq_name);
     exit(1);
   }
   return(seq_handle);
 }
 
-int dump_event(char event[], int channel, unsigned char data[], int data_len) {
+void dump_event(char event[], int channel, unsigned char data[], int data_len) {
   if (dump) {
     printf("%23s %3d ", event, channel);
     for (int i=0;i<data_len;i++) {
@@ -393,6 +402,47 @@ void compute_byte(unsigned char d) {
   }
 }
 
+void compute_midi_event(snd_seq_t *seq_handle, snd_midi_event_t *parser, int serial_fd) {
+  snd_seq_event_t *m_ev;
+  unsigned char out_buffer[100];
+  int size;
+  do {
+    snd_seq_event_input(seq_handle, &m_ev);
+    size = (int) snd_midi_event_decode(parser, out_buffer, 100, m_ev);
+    for (int i=0; i<size; i++) {
+      printf("%#x", out_buffer[i]);
+      if (write(serial_fd, out_buffer, (size_t) size) != size) {
+        fprintf(stderr, "Error sending event\n");
+      }
+    }
+    printf("\n");
+    if (dump) {
+      switch (m_ev->type) {
+        case SND_SEQ_EVENT_CONTROLLER:
+          printf("Control event on Channel %2d: %5d\n",
+                 m_ev->data.control.channel, m_ev->data.control.value);
+          break;
+        case SND_SEQ_EVENT_PITCHBEND:
+          printf("Pitchbender event on Channel %2d: %5d\n",
+                 m_ev->data.control.channel, m_ev->data.control.value);
+          break;
+        case SND_SEQ_EVENT_NOTEON:
+          printf("Note On event on Channel %2d: %5d\n",
+                 m_ev->data.control.channel, m_ev->data.note.note);
+          break;
+        case SND_SEQ_EVENT_NOTEOFF:
+          printf("Note Off event on Channel %2d: %5d\n",
+                 m_ev->data.control.channel, m_ev->data.note.note);
+          break;
+        default:
+          printf("Computed unknown event\n");
+          break;
+      }
+    }
+    snd_seq_free_event(m_ev);
+  } while (snd_seq_event_input_pending(seq_handle, 0) > 0);
+}
+
 int main(int argc, char **argv) {
   // argp
   struct arguments arguments;
@@ -451,21 +501,36 @@ int main(int argc, char **argv) {
     exit(1);
   }
   seq_handle = open_seq(arguments.alsa_seq_name);
+  if (snd_midi_event_new(100, &parser) < 0) {
+    fprintf(stderr, "Couldn't create MIDI en-/decoder\n");
+    exit(1);
+  }
+  int npfd;
+  struct pollfd *pfd;
+  npfd = snd_seq_poll_descriptors_count(seq_handle, POLLIN);
+  pfd = (struct pollfd *)alloca(npfd * sizeof(struct pollfd));
+  snd_seq_poll_descriptors(seq_handle, pfd, npfd, POLLIN);
+
   while(1) {
     available = read(serial_fd, &buffer, sizeof(buffer));
-    for (int i=0;i<available;i++) {
-      compute_byte(buffer[i]);
-    }
-    if (available == 0) {
-      if (access(arguments.args[0], R_OK) == -1) {
-	// device removed
-	printf("[serial-to-midi] Error: Device removed -> exit\n");
-	// send all notes off
-	snd_seq_ev_set_controller(&ev, ch, 0x7B, 0);
-	if (snd_seq_close(seq_handle) < 0)
-	  printf("Error: Couldn't close alsa_seq port\n");
-	exit(1);
+    if (available > -1) {
+      for (int i = 0; i < available; i++) {
+        compute_byte(buffer[i]);
       }
+    }
+    else {
+      if (access(arguments.args[0], R_OK) == -1) {
+        // device removed
+        printf("[serial-to-midi] Error: Device removed -> exit\n");
+        // send all notes off
+        snd_seq_ev_set_controller(&ev, ch, 0x7B, 0);
+        if (snd_seq_close(seq_handle) < 0)
+          printf("Error: Couldn't close alsa_seq port\n");
+        exit(1);
+      }
+    }
+    if (poll(pfd, npfd, 10) > 0) {
+      compute_midi_event(seq_handle, parser, serial_fd);
     }
     nanosleep(&ts, NULL);
   }
