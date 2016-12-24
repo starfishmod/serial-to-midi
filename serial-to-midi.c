@@ -42,7 +42,7 @@ struct arguments {
 // options
 static struct argp_option options[] = {
   {"alsa-seq-name", 'n', "seq-name", 0, "Name of the alsa_seq device"},
-  {"dump", 'd', 0, 0, "Dump MIDI events to stdout"},
+  {"dump", 'd', 0, 0, "Dump MIDI events from input to stdout"},
   {"supported-baudrates", 'b', 0, 0, "List supported baudrates"},
   {0}
 };
@@ -89,50 +89,15 @@ static char doc[] =
 // argp struct
 static struct argp argp = {options, parse_opt, args_doc, doc};
 
-// status bytes (byte 7-3)
-static const unsigned char NOTE_OFF = 0b1000;
-static const unsigned char NOTE_ON = 0b1001;
-static const unsigned char POLYPHONIC_AFTERTOUCH = 0b1010;
-static const unsigned char CONTROL_CHANGE = 0b1011;
-static const unsigned char PROGRAM_CHANGE = 0b1100;
-static const unsigned char CHANNEL_PRESSURE = 0b1101;
-static const unsigned char PITCH_BEND_CHANGE = 0b1110;
-static const unsigned char SYSTEM_COMMON = 0b1111;
-
-// System common messages (bytes 3-0)
-static const unsigned char SYSTEM_EXCLUSIVE = 0b0000;
-static const unsigned char TIME_CODE_QUARTER_FRAME = 0b0001;
-static const unsigned char SONG_POSITION_POINTER = 0b0010;
-static const unsigned char SONG_SELECT = 0b0011;
-static const unsigned char UNDEFINED_1 = 0b0100;
-static const unsigned char UNDEFINED_2 = 0b0101;
-static const unsigned char TUNE_REQUEST = 0b0110;
-static const unsigned char END_OF_EXCLUSIVE = 0b0111;
-
-// System realtime messages (bytes 3-0)
-static const unsigned char TIMING_CLOCK = 0b1000;
-static const unsigned char UNDEFINED_3 = 0b1001;
-static const unsigned char START = 0b1010;
-static const unsigned char CONTINUE = 0b1011;
-static const unsigned char STOP = 0b1100;
-static const unsigned char UNDEFINED_4 = 0b1101;
-static const unsigned char ACTIVE_SENSING = 0b1110;
-static const unsigned char RESET = 0b1111;
-
 int baudrate;
 int port_out_id;
-int port_in_id;
 snd_seq_t *seq_handle;
 snd_midi_event_t *parser;
 snd_seq_event_t ev;
 
-unsigned char status_byte = 0;
-unsigned char message_type = 0;
-unsigned char ch; // channel
 int data_byte_count = 0;
 int data_byte_num = 0;
-unsigned char data_bytes[100];
-char event_name[100];
+unsigned char data_bytes[1000];
 
 int send, in_sysex, dump; //boolean
 
@@ -176,23 +141,13 @@ snd_seq_t *open_seq(char alsa_seq_name[]) {
     fprintf(stderr, "[serial-to-midi] Error creating sequencer output port: %s.\n", alsa_seq_name);
     exit(1);
   }
-  if ((port_in_id = snd_seq_create_simple_port(seq_handle, "midi in",
-                                         SND_SEQ_PORT_CAP_WRITE|SND_SEQ_PORT_CAP_SUBS_WRITE,
-                                         SND_SEQ_PORT_TYPE_APPLICATION)) < 0) {
+  if ((snd_seq_create_simple_port(seq_handle, "midi in",
+                                  SND_SEQ_PORT_CAP_WRITE|SND_SEQ_PORT_CAP_SUBS_WRITE,
+                                  SND_SEQ_PORT_TYPE_APPLICATION)) < 0) {
     fprintf(stderr, "[serial-to-midi] Error creating sequencer input port: %s.\n", alsa_seq_name);
     exit(1);
   }
   return(seq_handle);
-}
-
-void dump_event(char event[], int channel, unsigned char data[], int data_len) {
-  if (dump) {
-    printf("%23s %3d ", event, channel);
-    for (int i=0;i<data_len;i++) {
-      printf("%#x ", data[i]);
-    }
-    printf("\n");
-  }
 }
 
 void send_event() {
@@ -204,211 +159,22 @@ void send_event() {
   snd_seq_ev_clear(&ev);
 }
 
-void compute_byte(unsigned char d) {
-  if (d >> 7) {
-    // status byte
-    status_byte = d;
-    message_type = d >> 4;
-    ch = d & 0b1111;
-    if (!in_sysex) {
-      data_byte_count = 0;
-    }
-    if (message_type == NOTE_OFF) {
-      data_byte_count = 2;
-    }
-    else if (message_type == NOTE_ON) {
-      data_byte_count = 2;
-    }
-    else if (message_type == POLYPHONIC_AFTERTOUCH) {
-      data_byte_count = 2;
-    }
-    else if (message_type == CONTROL_CHANGE) {
-      data_byte_count = 2;
-    }
-    else if (message_type == PROGRAM_CHANGE) {
-      data_byte_count = 1;
-    }
-    else if (message_type == CHANNEL_PRESSURE) {
-      data_byte_count = 1;
-    }
-    else if (message_type == PITCH_BEND_CHANGE) {
-      data_byte_count = 2;
-    }
-    else if (message_type == SYSTEM_COMMON) {
-      // System Common Messages
-      if (ch == SYSTEM_EXCLUSIVE) {
-	data_bytes[0] = d;
-	data_byte_num = 1;
-	in_sysex = 1;
-	data_byte_count = sizeof(data_bytes);
-      }
-      else if (ch == TIME_CODE_QUARTER_FRAME) {
-	data_byte_count = 1;
-      }
-      else if (ch == SONG_POSITION_POINTER) {
-	data_byte_count = 2;
-      }
-      else if (ch == SONG_SELECT) {
-	data_byte_count = 1;
-      }
-      else if (ch == UNDEFINED_1 || ch == UNDEFINED_2) {
-	printf("[serial-to-midi] Warning: Received undefined system common message: %d\n", ch);
-      }
-      else if (ch == TUNE_REQUEST) {
-	snd_seq_ev_set_fixed(&ev);
-	ev.type = SND_SEQ_EVENT_TUNE_REQUEST;
-	send_event();
-	dump_event("Tune Request", ch, data_bytes, 0);
-      }
-      else if (ch == END_OF_EXCLUSIVE) {
-	data_bytes[data_byte_num] = d;
-	in_sysex = 0;
-	data_byte_count = 0;
-	snd_seq_ev_set_sysex(&ev, data_byte_num + 1, data_bytes);
-	send_event();
-	dump_event("System Exclusive", 0, data_bytes, 0);
-      }
-
-      // System Real-Time messages
-      else if (ch == TIMING_CLOCK) {
-	snd_seq_ev_set_fixed(&ev);
-	ev.type = SND_SEQ_EVENT_CLOCK;
-	send_event();
-	dump_event("Timing Clock", 0, data_bytes, 0);
-      }
-      else if (ch == UNDEFINED_3 || ch == UNDEFINED_4) {
-	printf("[serial-to-midi] Warning: Received undefined system common message: %d\n", ch);
-      }
-      else if (ch == START) {
-	snd_seq_ev_set_fixed(&ev);
-	ev.type = SND_SEQ_EVENT_START;
-	send_event();
-	dump_event("Start", 0, data_bytes, 0);
-      }
-      else if (ch == CONTINUE) {
-	snd_seq_ev_set_fixed(&ev);
-	ev.type = SND_SEQ_EVENT_CONTINUE;
-	send_event();
-	dump_event("Continue", 0, data_bytes, 0);
-      }
-      else if (ch == STOP) {
-	snd_seq_ev_set_fixed(&ev);
-	ev.type = SND_SEQ_EVENT_STOP;
-	send_event();
-	dump_event("Stop", 0, data_bytes, 0);
-      }
-      else if (ch == ACTIVE_SENSING) {
-	snd_seq_ev_set_fixed(&ev);
-	ev.type = SND_SEQ_EVENT_SENSING;
-	send_event();
-	dump_event("Active Sensing", 0, data_bytes, 0);
-      }
-      else if (ch == RESET) {
-	snd_seq_ev_set_fixed(&ev);
-	ev.type = SND_SEQ_EVENT_RESET;
-	send_event();
-	dump_event("Reset", 0, data_bytes, 0);
-      }
-    }
-    else {
-      printf("[serial-to-midi] Unknown status byte: %d", d >> 4);
-    }
-    data_byte_num = 0;
-  }
-  else {
-    // data byte
-    if (data_byte_count == 0) {
-      return;
-    }
-    if (data_byte_num >= sizeof(data_bytes)) {
-      data_byte_num = 0;
-      printf("[serial-to-midi] Warning: data byte num exceeded maximum\nReset to 0\n");
-    }
-    data_bytes[data_byte_num] = d;
-    data_byte_num++;
-
-    if (data_byte_num >= data_byte_count && message_type > 0 && !in_sysex) {
-      // send message
-      data_byte_num = 0;
-      send = 1;
-
-      // status bytes
-      if (message_type == NOTE_OFF) {
-	snd_seq_ev_set_noteoff(&ev, ch, data_bytes[0], data_bytes[1]);
-	strncpy(event_name, "Note Off", 100);
-      }
-      else if (message_type == NOTE_ON) {
-	if (data_bytes[1] == 0) {
-	  snd_seq_ev_set_noteoff(&ev, ch, data_bytes[0], data_bytes[1]);
-	  strncpy(event_name, "Note Off", 100);
-	}
-	else {
-	  snd_seq_ev_set_noteon(&ev, ch, data_bytes[0], data_bytes[1]);
-	  strncpy(event_name, "Note On", 100);
-	}
-      }
-      else if (message_type == POLYPHONIC_AFTERTOUCH) {
-	snd_seq_ev_set_keypress(&ev, ch, data_bytes[0], data_bytes[1]);
-	strncpy(event_name, "Polyphonic Aftertouch", 100);
-      }
-      else if (message_type == CONTROL_CHANGE) {
-        snd_seq_ev_set_controller(&ev, ch, data_bytes[0], data_bytes[1]);
-	strncpy(event_name, "Control Change", 100);
-      }
-      else if (message_type == PROGRAM_CHANGE) {
-	snd_seq_ev_set_pgmchange(&ev, ch, data_bytes[0]);
-        strncpy(event_name, "Program Change", 100);
-      }
-      else if (message_type == CHANNEL_PRESSURE) {
-        snd_seq_ev_set_chanpress(&ev, ch, data_bytes[0]);
-	strncpy(event_name, "Channel Pressure", 100);
-      }
-      else if (message_type == PITCH_BEND_CHANGE) {
-	snd_seq_ev_set_pitchbend(&ev, ch, (int) (((int)data_bytes[1] & 0x7f) << 7 | ((int)data_bytes[0] & 0x7f)) - 0x2000);
-	strncpy(event_name, "Pitch Bend Change", 100);
-      }
-      else if (message_type == SYSTEM_COMMON) {
-	// system common messages
-	if (ch == TIME_CODE_QUARTER_FRAME) {
-	  snd_seq_ev_set_fixed(&ev);
-	  ev.type = SND_SEQ_EVENT_QFRAME;
-	  ev.data.control.value = data_bytes[0];
-	  strncpy(event_name, "TC Quarter Frame", 100);
-	}
-	else if (ch == SONG_POSITION_POINTER) {
-	  snd_seq_ev_set_fixed(&ev);
-	  ev.type = SND_SEQ_EVENT_SONGPOS;
-	  ev.data.control.value = (data_bytes[1] << 7) | data_bytes[0];
-	  strncpy(event_name, "Song Pos Pointer", 100);
-	}
-	else if (ch == SONG_SELECT) {
-	  snd_seq_ev_set_fixed(&ev);
-	  ev.type = SND_SEQ_EVENT_SONGSEL;
-	  ev.data.control.value = data_bytes[0];
-	  strncpy(event_name, "Song Select", 100);
-	}
-	else {
-	  send = 0;
-	}
-      }
-      else {
-	send = 0;
-      }
-      if (send) {
-	send_event();
-	dump_event(event_name, ch, data_bytes, data_byte_count);
-      }
-    }
+void compute_byte(unsigned char d, snd_midi_event_t *parser) {
+  int num = snd_midi_event_encode_byte(parser, d, &ev);
+  if (num < 0) {
+    fprintf(stderr, "Error computing byte\n");
+  } else if (num == 1) {
+    send_event();
   }
 }
 
 void compute_midi_event(snd_seq_t *seq_handle, snd_midi_event_t *parser, int serial_fd) {
   snd_seq_event_t *m_ev;
-  unsigned char out_buffer[100];
+  unsigned char out_buffer[1000];
   int size;
   do {
     snd_seq_event_input(seq_handle, &m_ev);
-    size = (int) snd_midi_event_decode(parser, out_buffer, 100, m_ev);
+    size = (int) snd_midi_event_decode(parser, out_buffer, 1000, m_ev);
     for (int i=0; i<size; i++) {
       printf("%#x", out_buffer[i]);
       if (write(serial_fd, out_buffer, (size_t) size) != size) {
@@ -501,7 +267,7 @@ int main(int argc, char **argv) {
     exit(1);
   }
   seq_handle = open_seq(arguments.alsa_seq_name);
-  if (snd_midi_event_new(100, &parser) < 0) {
+  if (snd_midi_event_new(10000, &parser) < 0) {
     fprintf(stderr, "Couldn't create MIDI en-/decoder\n");
     exit(1);
   }
@@ -515,7 +281,7 @@ int main(int argc, char **argv) {
     available = read(serial_fd, &buffer, sizeof(buffer));
     if (available > -1) {
       for (int i = 0; i < available; i++) {
-        compute_byte(buffer[i]);
+        compute_byte(buffer[i], parser);
       }
     }
     else {
@@ -523,7 +289,7 @@ int main(int argc, char **argv) {
         // device removed
         printf("[serial-to-midi] Error: Device removed -> exit\n");
         // send all notes off
-        snd_seq_ev_set_controller(&ev, ch, 0x7B, 0);
+        snd_seq_ev_set_controller(&ev, 0, 0x7B, 0);
         if (snd_seq_close(seq_handle) < 0)
           printf("Error: Couldn't close alsa_seq port\n");
         exit(1);
