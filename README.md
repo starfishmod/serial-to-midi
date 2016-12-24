@@ -1,11 +1,9 @@
-# Serial To MIDI
+# Serial To MIDI - MIDI To Serial
 A command line utility to convert serial MIDI signals to an alsa_seq port and back.
 
 Should support all MIDI events, but some are untested.
 
 Supports the following baud rates: 50, 75, 110, 134.5, 150, 200, 300, 600, 1200, 1800, 2400, 4800, 9600, 19200, 38400, 115200
-
-Running status byte is implemented, but the use is not recommended as the program sometime loses track which the first and which the second data byte was.
 
 ##Usage
 
